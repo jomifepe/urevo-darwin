@@ -1,0 +1,14 @@
+{
+  "name": "bleinspect",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "Passive BLE GATT inspector/logger for reverse-engineering the treadmill's characteristics",
+  "main": "bleinspect.js",
+  "scripts": {
+    "start": "node bleinspect.js"
+  },
+  "dependencies": {
+    "@stoprocent/noble": "^2.5.7"
+  }
+}
