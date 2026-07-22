@@ -39,25 +39,53 @@ const STOP_FRAME = Buffer.from('0253030c03', 'hex');
 const PAUSE_FRAME = Buffer.from('02530a0703', 'hex');
 
 // The trailer is a lookup table keyed by TARGET ALONE — not current, not
-// delta (see PROTOCOL.md §2). Confirmed across three independent sessions:
-// target=18 always needs 0x3d, target=10 always needs 0x05, target=20
-// always needs 0x33, regardless of the speed it was coming from. This is
-// almost certainly a firmware-side calibration table (e.g. motor/PWM
-// constants per speed), not a computable formula — no linear/CRC8/quadratic
-// fit ever matched. Seeded with every confirmed real value; grows at runtime
-// as "speed"/"searchspeed" discover new ones (see rememberTrailer below).
+// delta (see PROTOCOL.md §2). This is almost certainly a firmware-side
+// calibration table (e.g. motor/PWM constants per speed), not a computable
+// formula — no linear/CRC8/quadratic fit ever matched. Complete for the
+// treadmill's full range (1.0-6.0 km/h): extracted from a real HCI snoop
+// capture of the official app covering every speed, with zero conflicts
+// against every value we'd already confirmed independently across three
+// prior sessions days apart. Still grows at runtime for any target outside
+// this range via "speed"'s automatic search fallback (see rememberTrailer below).
 const SPEED_TRAILER_TABLE = {
   10: 0x05, 11: 0x3a, 12: 0x3b, 13: 0x38, 14: 0x39, 15: 0x3e, 16: 0x3f,
-  17: 0x3c, 18: 0x3d, 19: 0x32, 20: 0x33, 22: 0x31, 23: 0x36, 24: 0x37, 25: 0x34,
+  17: 0x3c, 18: 0x3d, 19: 0x32, 20: 0x33, 21: 0x30, 22: 0x31, 23: 0x36,
+  24: 0x37, 25: 0x34, 26: 0x35, 27: 0x2a, 28: 0x2b, 29: 0x28, 30: 0x29,
+  31: 0x2e, 32: 0x2f, 33: 0x2c, 34: 0x2d, 35: 0x22, 36: 0x23, 37: 0x20,
+  38: 0x21, 39: 0x26, 40: 0x27, 41: 0x24, 42: 0x25, 43: 0xda, 44: 0xdb,
+  45: 0xd8, 46: 0xd9, 47: 0xde, 48: 0xdf, 49: 0xdc, 50: 0xdd, 51: 0xd2,
+  52: 0xd3, 53: 0xd0, 54: 0xd1, 55: 0xd6, 56: 0xd7, 57: 0xd4, 58: 0xd5,
+  59: 0xca, 60: 0xcb,
 };
 
 function buildSetSpeedFrame(targetRaw, trailer) {
   const t = trailer ?? SPEED_TRAILER_TABLE[targetRaw];
-  if (t === undefined) throw new Error(`No known trailer for target=${targetRaw} — use searchspeed first`);
+  if (t === undefined) throw new Error(`No known trailer for target=${targetRaw} and none was provided`);
   const data = Buffer.alloc(2);
   data.writeUInt16LE(targetRaw, 0);
   return Buffer.from([0x02, 0x53, 0x02, data[0], data[1], t, 0x03]);
 }
+
+// Same "02 53 02" family as speed, but byte 4 is a fixed selector (0x0a)
+// instead of a 2-byte target, and byte 5 is the incline level x10. Also
+// target-only (see PROTOCOL.md §3.2), complete for all 9 levels — unlike
+// speed there's no telemetry confirmation available for incline (fff1 only
+// ever reports status/speed), so this is sent fire-and-forget, not verified.
+const INCLINE_TRAILER_TABLE = {
+  0: 0x05, 10: 0x33, 20: 0x29, 30: 0x27, 40: 0xdd,
+  50: 0xcb, 60: 0xc1, 70: 0xff, 80: 0xf5, 90: 0xe3,
+};
+
+function buildSetInclineFrame(level) {
+  const raw = level * 10;
+  const trailer = INCLINE_TRAILER_TABLE[raw];
+  if (trailer === undefined) throw new Error(`No known trailer for incline level=${level} (valid: 0-9)`);
+  return Buffer.from([0x02, 0x53, 0x02, 0x0a, raw, trailer, 0x03]);
+}
+
+// Stateless toggle — same frame turns the beep on and off; the device (not
+// the app) tracks which state it's in.
+const BEEP_TOGGLE_FRAME = Buffer.from([0x02, 0x40, 0x03, 0x01, ...Array(14).fill(0x00), 0x1e, 0x03]);
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -187,7 +215,8 @@ Commands:
   stop             send Stop
   pause            send Pause
   speed <raw>      set speed directly to a raw value (known targets are instant; unknown ones auto-search)
-  searchspeed <raw> force a fresh trailer search for one target, even if already known
+  incline <0-9>    set incline level (fire-and-forget, no telemetry to confirm it landed)
+  beep             toggle the beep on/off
   quit             stop and disconnect
 `);
 
@@ -226,19 +255,18 @@ Commands:
         );
       }
       await setSpeed(target);
-    } else if (cmd === 'searchspeed') {
-      const target = Number(arg);
-      if (!Number.isInteger(target) || target < 0) {
-        console.log('Usage: searchspeed <raw non-negative integer>');
+    } else if (cmd === 'incline') {
+      const level = Number(arg);
+      if (!Number.isInteger(level) || level < 0 || level > 9) {
+        console.log('Usage: incline <level 0-9>');
         return;
       }
-      const trailer = await searchSpeedTrailer(target);
-      if (trailer !== null) {
-        rememberTrailer(target, trailer);
-        console.log(`Speed change confirmed. Working trailer: 0x${trailer.toString(16).padStart(2, '0')} (remembered)`);
-      } else {
-        console.log('No trailer value (0x00-0xff) reached the target.');
-      }
+      const frame = buildSetInclineFrame(level);
+      await fff2.writeAsync(frame, false);
+      console.log(`Sent Set Incline -> level ${level} (frame: ${frame.toString('hex')}). No telemetry to confirm this — check the console.`);
+    } else if (cmd === 'beep') {
+      await fff2.writeAsync(BEEP_TOGGLE_FRAME, false);
+      console.log('Sent beep toggle.');
     } else {
       console.log(`Unknown command: ${cmd}`);
     }
@@ -362,6 +390,10 @@ function selfTest() {
 
   // Non-"02 51" frames (other message classes) must be rejected, not misread.
   assert.strictEqual(decodeFff1(Buffer.from('0240020000000000000000000000000000001803', 'hex')), null);
+
+  assert.strictEqual(buildSetInclineFrame(1).toString('hex'), '0253020a0a3303');
+  assert.strictEqual(buildSetInclineFrame(9).toString('hex'), '0253020a5ae303');
+  assert.strictEqual(BEEP_TOGGLE_FRAME.toString('hex'), '0240030100000000000000000000000000001e03');
 
   console.log('control.js self-check passed.');
 }
