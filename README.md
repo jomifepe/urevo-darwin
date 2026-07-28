@@ -1,1 +1,3 @@
-jailbreaking my urevo spacewalk 5l
+slopped jailbreak of the urevo spacewalk 5l
+
+credits: claude
