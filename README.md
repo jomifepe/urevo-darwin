@@ -1,3 +1,1 @@
-slopped jailbreak of the urevo spacewalk 5l
-
-credits: claude
+Slop jailbreak of the `UREVO SpaceWalk 5L Smart Walking Pad` 🦞
